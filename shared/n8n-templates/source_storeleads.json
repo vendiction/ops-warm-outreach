@@ -1,0 +1,106 @@
+{
+  "name": "OPS-WO · Source · StoreLeads (CSV ingest)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [{ "mode": "everyMinute" }] },
+        "triggerOn": "specificFolder",
+        "folderToWatch": { "__rl": true, "value": "REPLACE_FOLDER_ID", "mode": "id" },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "drive-trigger",
+      "name": "New CSV in Drive Folder",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [-720, 300],
+      "credentials": { "googleDriveOAuth2Api": { "id": "REPLACE_ME", "name": "Google Drive (FC)" } }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": { "__rl": true, "value": "={{ $json.id }}", "mode": "id" },
+        "options": {}
+      },
+      "id": "drive-download",
+      "name": "Download CSV",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [-500, 300],
+      "credentials": { "googleDriveOAuth2Api": { "id": "REPLACE_ME", "name": "Google Drive (FC)" } }
+    },
+    {
+      "parameters": { "operation": "csv", "options": {} },
+      "id": "extract-csv",
+      "name": "Parse CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [-280, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// StoreLeads CSV rows are already ecom + pre-filtered by Julia to the ecom ICP.\n// We still run the disqualifier (dropship/brick) and tag secondary_ecom.\n// Full 80K/$70 vs 60-100K/$27 gating happens in Phase 4 scoring, not here.\nconst DROPSHIP = [/\\bdropship(ping)?\\b/i, /\\baliexpress\\b/i, /\\bprint on demand\\b/i, /\\bpod\\b/i];\nfunction hostname(url){ try { return new URL(url.startsWith('http')?url:`https://${url}`).hostname.replace(/^www\\./,''); } catch { return null; } }\nconst out = [];\nfor (const item of $input.all()) {\n  const r = item.json;\n  const domain = hostname(r.domain || r.Domain || r.url || r.URL || '');\n  if (!domain) continue;\n  const name = r.company_name || r.name || r.Store || r.merchant || null;\n  const isDrop = DROPSHIP.some(re => re.test(`${name || ''} ${r.description || ''}`));\n  out.push({ json: {\n    domain,\n    company_name: name,\n    founder_name: r.founder_name || r.owner || null,\n    founder_email: r.email || r.Email || null,\n    founder_linkedin_url: r.linkedin || null,\n    founder_ig_handle: r.instagram || r.ig || null,\n    source: 'storeleads',\n    source_metadata: {\n      list_size: r.list_size ? Number(r.list_size) : null,\n      aov: r.aov ? Number(r.aov) : null,\n      platform: r.platform || null,\n      imported_from: $('New CSV in Drive Folder').item.json.name || null,\n      routing_confidence: 'high'\n    },\n    icp_tier: isDrop ? 'disqualified' : 'secondary_ecom',\n    is_archived: isDrop,\n    archive_reason: isDrop ? 'dropshipper' : null\n  }});\n}\nreturn out;"
+      },
+      "id": "code-ecom",
+      "name": "Normalize & Classify (ecom)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-60, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (domain, company_name, founder_name, founder_email, founder_linkedin_url, founder_ig_handle, source, source_metadata, icp_tier, is_archived, archive_reason)\nVALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::icp_tier_enum,$10,$11)\nON CONFLICT (LOWER(domain)) DO NOTHING\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [$json.domain, $json.company_name, $json.founder_name, $json.founder_email, $json.founder_linkedin_url, $json.founder_ig_handle, $json.source, JSON.stringify($json.source_metadata), $json.icp_tier, $json.is_archived, $json.archive_reason] }}"
+        }
+      },
+      "id": "pg-upsert",
+      "name": "Upsert Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [160, 300],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nSELECT id, 'source', $2::jsonb, 'system' FROM leads WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.id, JSON.stringify({ source: 'storeleads', tier: $('Normalize & Classify (ecom)').item.json.icp_tier }) ] }}"
+        }
+      },
+      "id": "pg-event",
+      "name": "Log Source Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [380, 300],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## Source · StoreLeads (manual CSV)\nStoreLeads free tier is UI-only, so Julia exports a weekly CSV matching the ecom ICP (80K+ list & $70+ AOV, OR 60–100K & $27+ AOV) into a watched Drive folder. This ingests it, runs the disqualifier, tags `secondary_ecom`, and upserts.\n\n**Set:** `Google Drive (FC)` OAuth credential; replace `REPLACE_FOLDER_ID` with the watched folder id; `Postgres · warm_outreach`.\n\n**CSV columns** (best-effort mapped): domain, company_name, email, list_size, aov, platform. Missing headers are tolerated.\n\nFull list/AOV gating is a Phase 4 concern — this only assigns the tier.",
+        "height": 300,
+        "width": 420
+      },
+      "id": "note-sl",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-500, -60]
+    }
+  ],
+  "connections": {
+    "New CSV in Drive Folder": { "main": [[{ "node": "Download CSV", "type": "main", "index": 0 }]] },
+    "Download CSV": { "main": [[{ "node": "Parse CSV", "type": "main", "index": 0 }]] },
+    "Parse CSV": { "main": [[{ "node": "Normalize & Classify (ecom)", "type": "main", "index": 0 }]] },
+    "Normalize & Classify (ecom)": { "main": [[{ "node": "Upsert Lead", "type": "main", "index": 0 }]] },
+    "Upsert Lead": { "main": [[{ "node": "Log Source Event", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {},
+  "meta": { "templatecredsSetupCompleted": false }
+}

@@ -1,0 +1,111 @@
+# OPS-WARM-OUTREACH — Metabase addition (BUILD_SPEC_0, item 6)
+#
+# This is the Metabase service to MERGE into the existing VPS docker-compose that
+# already runs Postgres + n8n. It is written as a standalone-valid file: the shared
+# network is declared `external` because n8n created it (`n8n_default`), and Postgres
+# is assumed to be the same container n8n already talks to.
+#
+# Secrets come from .env (NEVER inline — repo convention). Copy .env.example -> .env first.
+# Bring up just this service without disturbing the rest:
+#   docker compose -f docker-compose.yml up -d metabase
+#
+# Prereqs (run once, per BUILD_SPEC_0 implementation notes):
+#   psql -h localhost -U postgres -c "CREATE DATABASE metabase;"
+#   psql -h localhost -U postgres -c "CREATE USER metabase_user WITH PASSWORD '<vault>';"
+#   psql -h localhost -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE metabase TO metabase_user;"
+#   -- and a READ-ONLY role on warm_outreach for the Metabase data source:
+#   psql -h localhost -U postgres -d warm_outreach -c "CREATE USER metabase_ro WITH PASSWORD '<vault>';"
+#   psql -h localhost -U postgres -d warm_outreach -c "GRANT CONNECT ON DATABASE warm_outreach TO metabase_ro;"
+#   psql -h localhost -U postgres -d warm_outreach -c "GRANT USAGE ON SCHEMA public TO metabase_ro;"
+#   psql -h localhost -U postgres -d warm_outreach -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO metabase_ro;"
+#   psql -h localhost -U postgres -d warm_outreach -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO metabase_ro;"
+
+services:
+  metabase:
+    image: metabase/metabase:v0.50.21   # pinned; do not float to :latest on a prod VPS
+    container_name: metabase
+    restart: unless-stopped
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_HOST: postgres              # same Postgres container n8n uses
+      MB_DB_USER: ${METABASE_DB_USER}
+      MB_DB_PASS: ${METABASE_DB_PASS}
+      # Metabase's own admin session encryption key (generate once, keep stable):
+      MB_ENCRYPTION_SECRET_KEY: ${METABASE_ENCRYPTION_KEY}
+      JAVA_TIMEZONE: Asia/Manila
+    ports:
+      - "3010:3000"                     # reach behind Traefik/basic-auth, not open to internet
+    networks:
+      - n8n_default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s                 # Metabase JVM boot is slow; don't flap on first start
+
+  # ---------------------------------------------------------------------------
+  # Phase 3 audit worker — defined here for later, commented so Phase 0 stays
+  # infra-only (BUILD_SPEC_0 "Out": audit worker code is Phase 3). Uncomment when
+  # the worker modules exist and Phase 3 is being deployed.
+  # ---------------------------------------------------------------------------
+  # audit_worker:
+  #   build: ./audit_worker
+  #   container_name: audit_worker
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   networks:
+  #     - n8n_default
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+  #     interval: 60s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Phase 6 HITL bot — needs only the bot token + DB (no persona accounts), so it
+  # can run now. Long-lived gateway connection; restart policy keeps it up.
+  # ---------------------------------------------------------------------------
+  hitl_bot:
+    build: ./hitl_bot
+    container_name: hitl_bot
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - n8n_default
+
+  # ---------------------------------------------------------------------------
+  # Phase 8 digest — daily Discord digest (08:00) + weekly PDF (Sun 21:00).
+  # Reads the analytics views; no accounts needed.
+  # ---------------------------------------------------------------------------
+  digest:
+    build: ./digest
+    container_name: digest
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - n8n_default
+
+  # ---------------------------------------------------------------------------
+  # Send console — human-assisted DM queue (compliant Phase 7). Built from repo
+  # root so it can import reply_triage/ + prompts/. UI on :8095.
+  # ---------------------------------------------------------------------------
+  send_console:
+    build:
+      context: .
+      dockerfile: send_console/Dockerfile
+    container_name: send_console
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8095:8095"
+    networks:
+      - n8n_default
+
+networks:
+  # Created by the existing n8n stack. `external: true` = compose won't try to create it.
+  n8n_default:
+    driver: bridge

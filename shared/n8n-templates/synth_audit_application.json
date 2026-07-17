@@ -1,0 +1,167 @@
+{
+  "name": "OPS-WO \u00b7 Synth Audit (Application Funnels)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "id": "sched-synth",
+      "name": "Every 10 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS lead_id, l.company_name\nFROM leads l\nJOIN lead_enrichment e ON e.lead_id = l.id\nWHERE e.funnel_type = 'info_application_abandon'\n  AND l.is_archived = FALSE\n  AND NOT EXISTS (SELECT 1 FROM lead_audits a WHERE a.lead_id = l.id)\nORDER BY l.created_at ASC\nLIMIT 20;",
+        "options": {}
+      },
+      "id": "pg-find",
+      "name": "Application Leads Without Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -420,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a synthetic-but-honest audit for each application-funnel lead.\n// The gap is STRUCTURAL: application funnels almost universally lack a recovery\n// sequence for people who start and don't finish. We do NOT claim to have opted in;\n// the gap is inferred from the funnel type, as a human strategist would assess it.\nconst out = [];\nfor (const it of $input.all()) {\n  const r = it.json;\n  const company = r.company_name || 'this business';\n  const gap = 'Application funnel with no visible recovery sequence for people who start the '\n    + 'application and do not finish. Those are the warmest, highest-intent leads (' + company\n    + ' pre-qualified them by getting them to start), and they are leaking with no follow-up '\n    + 'to bring them back. Typically 30-50% of application starts go unfinished; a 2-3 email '\n    + 'recovery flow recovers a meaningful slice.';\n  out.push({ json: { lead_id: r.lead_id, gap_summary: gap } });\n}\nreturn out;"
+      },
+      "id": "code-synth",
+      "name": "Compose Synthetic Audit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_audits (lead_id, audit_mode, audit_status, started_at, completed_at, abandoned_application_followup_count, discount_offered, gap_summary)\nVALUES ($1, 'info_application_abandon'::audit_mode_enum, 'complete', NOW(), NOW(), 0, false, $2)\nRETURNING lead_id;",
+        "options": {
+          "queryReplacement": "={{ $json.lead_id }},{{ $json.gap_summary }}"
+        }
+      },
+      "id": "pg-insert-audit",
+      "name": "Write Synthetic Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        20,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'audit', '{\"mode\":\"synthetic_application\",\"reason\":\"application_funnel_not_auto_auditable\"}'::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ $('Compose Synthetic Audit').item.json.lead_id }}"
+        }
+      },
+      "id": "pg-log",
+      "name": "Log Synth Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        240,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Synth Audit \u2014 Application Funnels (Option C)\n\nApplication funnels (multi-field / HubSpot \"apply today\" forms) CANNOT be auto-audited. Instead of stalling those leads (scoring + drafting both require a completed audit), this writes a synthetic 'complete' audit carrying the structural application-abandon gap. They then flow to scoring -> drafting like any lead.\n\nThe gap is inferred from the funnel type (how a human strategist assesses an application funnel); we never claim to have opted in.\n\nFlow: enrichment tags funnel_type='info_application_abandon' -> this writes a synth audit -> scoring + drafting pick it up.\n\nWire: Postgres cred on all 3 DB nodes. Runs every 10 min. Idempotent (skips leads that already have an audit). Uses parameterized queries ($1/$2) so the gap text is safely escaped.\n\nOpt-in funnels still go to the real audit worker. Captcha'd funnels are skipped."
+      },
+      "id": "note",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        20
+      ]
+    }
+  ],
+  "connections": {
+    "Every 10 min": {
+      "main": [
+        [
+          {
+            "node": "Application Leads Without Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Application Leads Without Audit": {
+      "main": [
+        [
+          {
+            "node": "Compose Synthetic Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Synthetic Audit": {
+      "main": [
+        [
+          {
+            "node": "Write Synthetic Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Synthetic Audit": {
+      "main": [
+        [
+          {
+            "node": "Log Synth Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
