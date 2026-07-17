@@ -1,0 +1,125 @@
+{
+  "name": "OPS-WO · Send Cold Email",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] } },
+      "id": "sched",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-960, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Approved cold-email drafts that are DUE. Step 1 sends immediately; later steps\n-- send only once the previous step was sent AND the cadence gap has elapsed\n-- (step2 = +3d, step3 = +2d, step4 = +3d after the previous step).\nWITH gated AS (\n  SELECT lo.id, lo.lead_id, lo.sequence_step, COALESCE(lo.approved_body, lo.draft_body) AS body,\n         l.founder_email,\n         p.sent_at AS prev_sent_at,\n         CASE lo.sequence_step WHEN 2 THEN 3 WHEN 3 THEN 2 WHEN 4 THEN 3 ELSE 0 END AS offset_days\n  FROM lead_outreach lo\n  JOIN leads l ON l.id = lo.lead_id\n  LEFT JOIN lead_outreach p ON p.lead_id = lo.lead_id AND p.channel='cold_email'\n                            AND p.sequence_step = lo.sequence_step - 1 AND p.status='sent'\n  WHERE lo.channel='cold_email' AND lo.status='approved' AND l.founder_email IS NOT NULL\n)\nSELECT id, lead_id, sequence_step, body, founder_email\nFROM gated\nWHERE sequence_step = 1\n   OR (prev_sent_at IS NOT NULL AND NOW() >= prev_sent_at + (offset_days || ' days')::interval)\nORDER BY sequence_step, lead_id\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "pg-due",
+      "name": "Due Cold Emails",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-740, 300],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } }
+    },
+    {
+      "parameters": { "batchSize": 1, "options": {} },
+      "id": "loop",
+      "name": "Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-520, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split the folded 'Subject: X\\n\\n<body>' back into subject + body for the email send.\nconst r = $('Loop').item.json;\nconst raw = r.body || '';\nlet subject = '(no subject)'; let body = raw;\nconst m = raw.match(/^Subject:\\s*(.+?)\\n\\n([\\s\\S]*)$/);\nif (m) { subject = m[1].trim(); body = m[2]; }\nreturn [{ json: { outreach_id: r.id, lead_id: r.lead_id, step: r.sequence_step, to: r.founder_email, subject, body } }];"
+      },
+      "id": "split",
+      "name": "Split Subject/Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-300, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.COLD_EMAIL_SEND_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { to: $json.to, subject: $json.subject, body: $json.body, lead_id: $json.lead_id, outreach_id: $json.outreach_id, step: $json.step } }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-send",
+      "name": "Dispatch via 15-inbox stack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, 300],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE lead_outreach SET status='sent', sent_at=NOW(), updated_at=NOW() WHERE id=$1 AND status='approved';",
+        "options": { "queryReplacement": "={{ [$('Split Subject/Body').item.json.outreach_id] }}" }
+      },
+      "id": "pg-sent",
+      "name": "Mark Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [160, 220],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, outreach_id, event_type, event_data, actor)\nVALUES ($1, $2, 'send', $3::jsonb, 'system');",
+        "options": { "queryReplacement": "={{ [$('Split Subject/Body').item.json.lead_id, $('Split Subject/Body').item.json.outreach_id, JSON.stringify({ channel: 'cold_email', step: $('Split Subject/Body').item.json.step }) ] }}" }
+      },
+      "id": "pg-event",
+      "name": "Log Send Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [380, 220],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "amount": 3, "unit": "seconds" },
+      "id": "jitter",
+      "name": "Jitter",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "content": "## Send Cold Email (automated — compliant)\nEvery 15 min: dispatches **approved** `cold_email` drafts that are DUE per the 4-touch cadence (step1 now; step2 +3d, step3 +2d, step4 +3d after the prior step is sent). Splits the folded `Subject:`/body, POSTs to the **existing 15-inbox stack** webhook (which owns inbox rotation + per-inbox caps + warmup), then marks sent + logs.\n\nThis is the fully-automated channel — no browser automation, no evasion. Email is a compliant B2B channel (respect CAN-SPAM / include opt-out in the template).\n\n**Set:** `Postgres · warm_outreach` credential; env `COLD_EMAIL_SEND_WEBHOOK` (your existing stack's intake).\n**Idempotent:** the `status='approved'` guard means a re-run never double-sends.",
+        "height": 300,
+        "width": 470
+      },
+      "id": "note",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-740, -60]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "Due Cold Emails", "type": "main", "index": 0 }]] },
+    "Due Cold Emails": { "main": [[{ "node": "Loop", "type": "main", "index": 0 }]] },
+    "Loop": { "main": [[], [{ "node": "Split Subject/Body", "type": "main", "index": 0 }]] },
+    "Split Subject/Body": { "main": [[{ "node": "Dispatch via 15-inbox stack", "type": "main", "index": 0 }]] },
+    "Dispatch via 15-inbox stack": { "main": [[{ "node": "Mark Sent", "type": "main", "index": 0 }]] },
+    "Mark Sent": { "main": [[{ "node": "Log Send Event", "type": "main", "index": 0 }]] },
+    "Log Send Event": { "main": [[{ "node": "Jitter", "type": "main", "index": 0 }]] },
+    "Jitter": { "main": [[{ "node": "Loop", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {},
+  "meta": { "templatecredsSetupCompleted": false }
+}

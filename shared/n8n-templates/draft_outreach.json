@@ -1,0 +1,447 @@
+{
+  "name": "OPS-WO \u00b7 Draft Outreach",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "sched",
+      "name": "Every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS lead_id, l.company_name, l.founder_name,\n       l.founder_ig_handle, l.founder_linkedin_url, l.founder_fb_handle, l.founder_email,\n       l.qualification_score,\n       e.recent_social_posts, e.tech_stack,\n       a.gap_summary\nFROM leads l\nLEFT JOIN lead_enrichment e ON e.lead_id = l.id\nLEFT JOIN lead_audits a ON a.lead_id = l.id AND a.audit_status = 'complete'\nWHERE l.qualification_score >= 15\n  AND l.is_archived = FALSE\n  AND NOT EXISTS (SELECT 1 FROM lead_outreach lo WHERE lo.lead_id = l.id)\nORDER BY l.qualification_score DESC\nLIMIT 10;",
+        "options": {}
+      },
+      "id": "pg-select",
+      "name": "Scored Leads To Draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -960,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Expand each scored lead into one job per supported channel.\nconst DM_SONNET = `## System\n\nYou are a copywriter drafting personalized outreach for FascinateCopy, an email marketing agency selling $5,000\u2013$7,000/month retainers.\n\nYou are writing to a specific prospect based on:\n1. A **technical audit finding** \u2014 a specific revenue leak we found in their email funnel\n2. A **recent social post** \u2014 something they published in the last 2 weeks\n\nEvery message you write must reference BOTH. Never just one.\n\n## Absolute rules\n\n- **Never close in a DM.** The goal is a screen-share call, not a signature.\n- **Message 1 must be \u2264 160 characters.** Count every character including spaces and punctuation.\n- **No cliffhangers or curiosity bait.** (\"I found something crazy about your business...\") Sophisticated founders hate this.\n- **No fake compliments.** Do not open with \"Love your recent post!\" or \"Your content is amazing.\" These are AI-flavored and prospects notice.\n- **The tease-then-deliver rule:** In Msg 1 you TEASE the gap (name the symptom, ask permission to share the fix). In Msg 2 (only sent after they reply \"yes\"), you DELIVER the specific technical diagnosis.\n- **No em-dashes.** Prospects associate em-dashes with AI. Use commas, periods, or parentheses instead.\n- **No sales language** \u2014 no \"offer,\" no \"package,\" no \"hop on a quick call.\"\n\n## S.I.P.E. framework for Msg 1\n\n- **S**hort \u2014 under 160 chars, easy to scan\n- **I**ncomplete \u2014 leaves a question in their mind that only a reply resolves\n- **P**ersonal \u2014 references specific audit gap + specific social post\n- **E**motional \u2014 connects the gap to a feeling (frustration, missed opportunity, quiet loss)\n\n## Output\n\nReturn ONLY this JSON. No preamble.\n\n\\`\\`\\`json\n{\n  \"channel\": \"<echoes input>\",\n  \"messages\": [\n    {\n      \"step\": 1,\n      \"body\": \"<\u2264160 chars, S.I.P.E.>\",\n      \"char_count\": <int>,\n      \"references_gap\": true,\n      \"references_social_post\": true\n    },\n    {\n      \"step\": 2,\n      \"body\": \"<mid-length, delivers the gap technically, ends with a specific question>\",\n      \"char_count\": <int>\n    },\n    {\n      \"step\": 3,\n      \"body\": \"<soft ask for screen-share \u2014 'want me to show you on a quick 15-min screen share?'>\",\n      \"char_count\": <int>\n    }\n  ]\n}\n\\`\\`\\`\n\n## Input format\n\nYou will receive:\n- \\`channel\\` \u2014 \"dm_ig\" | \"dm_linkedin\" | \"dm_fb\"\n- \\`prospect\\` \u2014 object with \\`first_name\\`, \\`company_name\\`, \\`recent_social_posts\\` (array)\n- \\`audit_gap\\` \u2014 the specific gap (e.g. \"Zero abandoned application follow-up emails\")\n- \\`gap_summary\\` \u2014 one-sentence version of the gap\n- \\`tech_stack\\`\n\n## Style anchors per channel\n\n- **IG DM:** casual, one emoji max (natural, not decorative), no LinkedIn-formal language\n- **LinkedIn DM:** more professional, no emoji, tighter grammar\n- **Facebook DM:** somewhere between; assume conversational\n\n## Golden example\n\n**Input:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_ig\",\n  \"prospect\": {\n    \"first_name\": \"Sarah\",\n    \"recent_social_posts\": [{\"text\": \"The biggest mistake new coaches make is undercharging their first offer\"}]\n  },\n  \"audit_gap\": \"Zero abandoned application follow-up emails after starting the discovery call form\",\n  \"gap_summary\": \"You're leaking calls at the application step \u2014 nothing follows up when someone bails.\"\n}\n\\`\\`\\`\n\n**Output:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_ig\",\n  \"messages\": [\n    {\n      \"step\": 1,\n      \"body\": \"Hey Sarah, your post about undercharging hit. Started your discovery call form yesterday, bailed halfway, got zero follow-up. Fixable \u2014 share?\",\n      \"char_count\": 152,\n      \"references_gap\": true,\n      \"references_social_post\": true\n    },\n    {\n      \"step\": 2,\n      \"body\": \"Quick breakdown: when someone starts your Kajabi call-booking form and drops off, no email fires. That's likely 20 to 40% of your call volume disappearing weekly. Two-email recovery flow would catch most of them. Want me to sketch what that looks like?\",\n      \"char_count\": 245\n    },\n    {\n      \"step\": 3,\n      \"body\": \"Easier if I show you on a 15-min screen share, actual numbers from your funnel and where the flow would drop in. Wednesday or Thursday afternoon your time?\",\n      \"char_count\": 151\n    }\n  ]\n}\n\\`\\`\\``;\nconst DM_OPUS = `## System\n\nYou are a copywriter drafting personalized outreach for FascinateCopy, an email marketing agency selling $5,000\u2013$7,000/month retainers.\n\nYou are writing to a specific prospect based on:\n1. A **technical audit finding** \u2014 a specific revenue leak we found in their email funnel\n2. A **recent social post** \u2014 something they published in the last 2 weeks\n\nEvery message you write must reference BOTH. Never just one.\n\n## Absolute rules\n\n- **Never close in a DM.** The goal is a screen-share call, not a signature.\n- **Message 1 must be \u2264 160 characters.** Count every character including spaces and punctuation.\n- **No cliffhangers or curiosity bait.** (\"I found something crazy about your business...\") Sophisticated founders hate this.\n- **No fake compliments.** Do not open with \"Love your recent post!\" or \"Your content is amazing.\" These are AI-flavored and prospects notice.\n- **The tease-then-deliver rule:** In Msg 1 you TEASE the gap (name the symptom, ask permission to share the fix). In Msg 2 (only sent after they reply \"yes\"), you DELIVER the specific technical diagnosis.\n- **No em-dashes.** Prospects associate em-dashes with AI. Use commas, periods, or parentheses instead.\n- **No sales language** \u2014 no \"offer,\" no \"package,\" no \"hop on a quick call.\"\n\n## S.I.P.E. framework for Msg 1\n\n- **S**hort \u2014 under 160 chars, easy to scan\n- **I**ncomplete \u2014 leaves a question in their mind that only a reply resolves\n- **P**ersonal \u2014 references specific audit gap + specific social post\n- **E**motional \u2014 connects the gap to a feeling (frustration, missed opportunity, quiet loss)\n\n## Output\n\nReturn ONLY this JSON. No preamble.\n\n\\`\\`\\`json\n{\n  \"channel\": \"<echoes input>\",\n  \"messages\": [\n    {\n      \"step\": 1,\n      \"body\": \"<\u2264160 chars, S.I.P.E.>\",\n      \"char_count\": <int>,\n      \"references_gap\": true,\n      \"references_social_post\": true\n    },\n    {\n      \"step\": 2,\n      \"body\": \"<mid-length, delivers the gap technically, ends with a specific question>\",\n      \"char_count\": <int>\n    },\n    {\n      \"step\": 3,\n      \"body\": \"<soft ask for screen-share \u2014 'want me to show you on a quick 15-min screen share?'>\",\n      \"char_count\": <int>\n    }\n  ]\n}\n\\`\\`\\`\n\n## Input format\n\nYou will receive:\n- \\`channel\\` \u2014 \"dm_ig\" | \"dm_linkedin\" | \"dm_fb\"\n- \\`prospect\\` \u2014 object with \\`first_name\\`, \\`company_name\\`, \\`recent_social_posts\\` (array)\n- \\`audit_gap\\` \u2014 the specific gap (e.g. \"Zero abandoned application follow-up emails\")\n- \\`gap_summary\\` \u2014 one-sentence version of the gap\n- \\`tech_stack\\`\n\n## Style anchors per channel\n\n- **IG DM:** casual, one emoji max (natural, not decorative), no LinkedIn-formal language\n- **LinkedIn DM:** more professional, no emoji, tighter grammar\n- **Facebook DM:** somewhere between; assume conversational\n\n## Golden example\n\n**Input:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_ig\",\n  \"prospect\": {\n    \"first_name\": \"Sarah\",\n    \"recent_social_posts\": [{\"text\": \"The biggest mistake new coaches make is undercharging their first offer\"}]\n  },\n  \"audit_gap\": \"Zero abandoned application follow-up emails after starting the discovery call form\",\n  \"gap_summary\": \"You're leaking calls at the application step \u2014 nothing follows up when someone bails.\"\n}\n\\`\\`\\`\n\n**Output:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_ig\",\n  \"messages\": [\n    {\n      \"step\": 1,\n      \"body\": \"Hey Sarah, your post about undercharging hit. Started your discovery call form yesterday, bailed halfway, got zero follow-up. Fixable \u2014 share?\",\n      \"char_count\": 152,\n      \"references_gap\": true,\n      \"references_social_post\": true\n    },\n    {\n      \"step\": 2,\n      \"body\": \"Quick breakdown: when someone starts your Kajabi call-booking form and drops off, no email fires. That's likely 20 to 40% of your call volume disappearing weekly. Two-email recovery flow would catch most of them. Want me to sketch what that looks like?\",\n      \"char_count\": 245\n    },\n    {\n      \"step\": 3,\n      \"body\": \"Easier if I show you on a 15-min screen share, actual numbers from your funnel and where the flow would drop in. Wednesday or Thursday afternoon your time?\",\n      \"char_count\": 151\n    }\n  ]\n}\n\\`\\`\\`\n\n---\n\n# HOT-QUEUE EMPHASIS (score 20+)\n\n## System\n\nSame rules as \\`drafting_sonnet.md\\` \u2014 read that first. Everything applies here.\n\nThe only difference: this is a HIGH-VALUE prospect. Score 20+ on the qualification rubric. Expect them to be sophisticated, marketed to constantly, and dismissive of generic outreach.\n\nExtra emphasis on:\n\n1. **Specificity over cleverness.** These founders can smell copy tricks. They cannot smell a technical observation that only someone who audited their funnel could have made. Lean into the audit finding hard.\n\n2. **Peer register, not vendor register.** Write like a competent colleague noticing something, not like a pitch. \"Hey Alex, hit your welcome sequence \u2014 you're missing X.\" is better than \"Hi Alex! I hope this finds you well...\"\n\n3. **Numbers where possible.** If the audit finding lets you quantify (\"that's likely 15% of your list going to promotions\"), quantify it. Numbers earn trust with sophisticated buyers.\n\n4. **No exclamation points except in genuine surprise.** Hot prospects have exclamation-point fatigue.\n\n## Same output shape\n\n\\`\\`\\`json\n{\n  \"channel\": \"<echoes input>\",\n  \"messages\": [\n    {\"step\": 1, \"body\": \"<\u2264160 chars>\", \"char_count\": <int>, \"references_gap\": true, \"references_social_post\": true},\n    {\"step\": 2, \"body\": \"<mid-length technical delivery>\", \"char_count\": <int>},\n    {\"step\": 3, \"body\": \"<screen-share ask>\", \"char_count\": <int>}\n  ]\n}\n\\`\\`\\`\n\n## Golden example\n\n**Input:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_linkedin\",\n  \"prospect\": {\n    \"first_name\": \"David\",\n    \"company_name\": \"Peak Coaching\",\n    \"recent_social_posts\": [{\"text\": \"The lifetime value of a coaching client is 5-8x higher than most founders realize. Most stop retargeting after 30 days. Massive mistake.\"}]\n  },\n  \"audit_gap\": \"Welcome sequence has no CTA, single email only, sent to Promotions tab\",\n  \"gap_summary\": \"Your welcome sequence is one email, no CTA, landing in Promotions. First-week engagement is where your LTV starts and you're losing it.\"\n}\n\\`\\`\\`\n\n**Output:**\n\\`\\`\\`json\n{\n  \"channel\": \"dm_linkedin\",\n  \"messages\": [\n    {\n      \"step\": 1,\n      \"body\": \"David, your LTV point resonates. Ran your opt-in yesterday, one welcome email, no CTA, landed in Promotions. Same problem you called out. Share?\",\n      \"char_count\": 148,\n      \"references_gap\": true,\n      \"references_social_post\": true\n    },\n    {\n      \"step\": 2,\n      \"body\": \"Specifics from the audit: welcome fires once from ConvertKit, subject line pattern triggering Promotions placement in Gmail, no CTA to your Discovery call or lead magnet upgrade. Given you already know LTV is where the money is, tightening the first 7 days should shift conversion 15 to 25% based on what I've seen with similar Kajabi setups. Want the full breakdown?\",\n      \"char_count\": 358\n    },\n    {\n      \"step\": 3,\n      \"body\": \"Easier to show than describe. 15 min screen share, I walk you through the actual emails you sent me and what a corrected first-7-days looks like. Wednesday or Thursday work?\",\n      \"char_count\": 170\n    }\n  ]\n}\n\\`\\`\\``;\nconst EMAIL_SYS = `## System\n\nYou are a copywriter drafting a cold EMAIL sequence for FascinateCopy, an email marketing\nagency selling $5,000\u2013$7,000/month retainers. Same prospect basis as the DM channel: a specific\ntechnical audit finding plus a recent social post. Every email references the audit gap; email 1\nalso references the recent post.\n\n## Absolute rules (same spirit as the DM prompt)\n\n- Plain text. No HTML, no images, no signatures block.\n- Never close in the email. The goal is a 15-minute screen-share call, framed as showing them\n  their own funnel numbers \u2014 not a \"book a call\" CTA.\n- No cliffhangers, no curiosity bait, no fake compliments.\n- No em-dashes. Use commas, periods, or parentheses.\n- No sales language (\"offer\", \"package\", \"hop on a quick call\", \"free strategy session\").\n- Subject lines are lowercase, specific, and under 45 characters. No clickbait, no \"quick question\".\n- Emails are short: 3\u20135 sentences. Sophisticated founders skim.\n\n## The 4-touch cadence\n\n- **Email 1 (day 0):** subject + 3-sentence body. Name the audit gap, tie to the recent post, end with a soft permission question (\"worth a look?\").\n- **Email 2 (day 3):** deliver a concrete piece of the audit as proof (a number, a specific missing flow). No ask beyond \"want the rest?\".\n- **Email 3 (day 5):** soft ask for a 15-min screen-share to show their funnel numbers.\n- **Email 4 (day 8):** breakup email. One line, no guilt, leaves the door open.\n\n## Output\n\nReturn ONLY this JSON. No preamble.\n\n\\`\\`\\`json\n{\n  \"channel\": \"cold_email\",\n  \"messages\": [\n    { \"step\": 1, \"subject\": \"<lowercase, <45 chars>\", \"body\": \"<3 sentences, gap + post>\", \"char_count\": <int body length> },\n    { \"step\": 2, \"subject\": \"<lowercase>\", \"body\": \"<proof>\", \"char_count\": <int> },\n    { \"step\": 3, \"subject\": \"<lowercase>\", \"body\": \"<soft screen-share ask>\", \"char_count\": <int> },\n    { \"step\": 4, \"subject\": \"<lowercase>\", \"body\": \"<one-line breakup>\", \"char_count\": <int> }\n  ]\n}\n\\`\\`\\`\n\n## Input format\n\nSame as the DM prompt: \\`channel\\` (\"cold_email\"), \\`prospect\\` (\\`first_name\\`, \\`company_name\\`,\n\\`recent_social_posts\\`), \\`audit_gap\\`, \\`gap_summary\\`, \\`tech_stack\\`.\n\n## Golden example\n\n**Input:**\n\\`\\`\\`json\n{\"channel\":\"cold_email\",\"prospect\":{\"first_name\":\"Sarah\",\"company_name\":\"Sarah Coaching\",\"recent_social_posts\":[{\"text\":\"The biggest mistake new coaches make is undercharging\"}]},\"audit_gap\":\"Zero abandoned-application follow-up after the discovery call form\",\"gap_summary\":\"You're leaking calls at the application step.\"}\n\\`\\`\\`\n\n**Output:**\n\\`\\`\\`json\n{\n  \"channel\": \"cold_email\",\n  \"messages\": [\n    { \"step\": 1, \"subject\": \"your discovery form drop-off\", \"body\": \"Sarah, your post on undercharging is right, and there's a quieter version of it happening in your funnel. I started your discovery-call form and dropped off, and nothing followed up. That's booked calls leaking silently. Worth a look?\", \"char_count\": 232 },\n    { \"step\": 2, \"subject\": \"the number on that form\", \"body\": \"Quick proof: when someone starts your Kajabi call form and bails, no email fires. For a list your size that's usually 20 to 40 percent of call volume gone each week. A two-email recovery flow catches most of it. Want the full breakdown?\", \"char_count\": 235 },\n    { \"step\": 3, \"subject\": \"15 min, your funnel on screen\", \"body\": \"Easier to show than tell. I can walk your actual funnel numbers and where the recovery flow drops in, 15 minutes, screen shared. Wednesday or Thursday afternoon your time?\", \"char_count\": 174 },\n    { \"step\": 4, \"subject\": \"closing the loop\", \"body\": \"I'll leave this here for now, Sarah. If the application drop-off ever moves up your list, you know where to find me.\", \"char_count\": 116 }\n  ]\n}\n\\`\\`\\``;\nconst out = [];\nfor (const it of $input.all()) {\n  const r = it.json;\n  const isHot = (r.qualification_score || 0) >= 20;\n  const model = isHot ? 'opus' : 'sonnet';\n  const modelId = isHot ? 'claude-opus-4-7' : 'claude-sonnet-4-6';\n  const maxTokens = isHot ? 1000 : 800;\n  const dmSystem = isHot ? DM_OPUS : DM_SONNET;\n  const firstName = (r.founder_name || '').split(' ')[0] || null;\n  const prospect = { first_name: firstName, company_name: r.company_name, recent_social_posts: r.recent_social_posts || [] };\n  const channels = [];\n  if (r.founder_ig_handle) channels.push('dm_ig');\n  if (r.founder_linkedin_url) channels.push('dm_linkedin');\n  if (r.founder_fb_handle) channels.push('dm_fb');\n  if (r.founder_email) channels.push('cold_email');\n  for (const channel of channels) {\n    const isDm = channel.startsWith('dm_');\n    const payload = { channel, prospect, audit_gap: (r.gap_summary || ''), gap_summary: (r.gap_summary || ''), tech_stack: r.tech_stack || {} };\n    out.push({ json: { lead_id: r.lead_id, channel, is_dm: isDm, model, model_id: modelId, max_tokens: maxTokens, system: (isDm ? dmSystem : EMAIL_SYS), payload } });\n  }\n}\nreturn out;"
+      },
+      "id": "expand",
+      "name": "Expand To Channel Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop",
+      "name": "Loop jobs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: $json.model_id, max_tokens: $json.max_tokens, temperature: 0.7, system: $json.system, messages: [ { role: 'user', content: JSON.stringify($json.payload) } ] } }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "draft",
+      "name": "Draft (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -300,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic API (x-api-key)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 4000
+    },
+    {
+      "parameters": {
+        "jsCode": "const FORBIDDEN = [\"Love your recent post\", \"Love your content\", \"Your content is amazing\", \"Great post about\", \"Hope this finds you well\", \"I hope you're doing well\", \"Just wanted to reach out\", \"I wanted to reach out\", \"I came across your profile\", \"I noticed you're\", \"I saw that you\", \"Reaching out because\", \"Big fan of\", \"I found something crazy\", \"You won't believe what\", \"I have a secret\", \"Something interesting about your business\", \"Something surprising\", \"I noticed a weird thing\", \"Curious about something I found\", \"Hop on a quick call\", \"Jump on a call\", \"Get on a call\", \"Book a call\", \"Free strategy session\", \"Complimentary audit\", \"No obligation\", \"Discounted rate\", \"Limited time\", \"Special offer\", \"Just checking in\", \"Following up\", \"Circling back\", \"Bumping this\", \"Wanted to touch base\", \"Touch base\", \"Quick question\", \"Delve into\", \"In the realm of\", \"Tapestry\", \"Symphony\", \"Testament to\", \"Meticulously\", \"It's worth noting\"];\nconst respBody = $json;\nlet text = '';\ntry { text = (respBody.content || []).filter(b => b.type === 'text').map(b => b.text).join(''); } catch (e) {}\nlet parsed;\ntry { parsed = JSON.parse((text || '').replace(/```json|```/g, '').trim()); }\ncatch (e) { throw new Error('malformed_json_from_model'); }\nconst job = $('Loop jobs').item.json;\nconst isDm = job.is_dm;\nconst msgs = parsed.messages || [];\nif (!Array.isArray(msgs) || msgs.length === 0) throw new Error('no_messages');\nconst expected = isDm ? 3 : 4;\nif (msgs.length !== expected) throw new Error('expected_' + expected + '_messages_got_' + msgs.length);\nconst gap = (job.payload.gap_summary || '').toLowerCase();\nconst gapWords = gap.split(/[^a-z0-9]+/).filter(w => w.length > 4);\nconst rows = [];\nfor (const m of msgs) {\n  if (!m.body) throw new Error('empty_body_step_' + m.step);\n  let stored = m.body;\n  if (!isDm) {\n    if (!m.subject) throw new Error('email_missing_subject_step_' + m.step);\n    stored = 'Subject: ' + m.subject + '\\n\\n' + m.body;\n  }\n  const lc = (m.body + ' ' + (m.subject || '')).toLowerCase();\n  for (const p of FORBIDDEN) { if (lc.includes(p.toLowerCase())) throw new Error('forbidden_phrase:' + p + '@' + m.step); }\n  if (m.body.includes(' \\u2014 ')) throw new Error('em_dash@' + m.step);\n  if (m.body.includes('!!!')) throw new Error('triple_bang@' + m.step);\n  if (isDm && m.step === 1 && m.body.length > 160) throw new Error('msg1_over_160:' + m.body.length);\n  if (m.step === 1 && gapWords.length && !gapWords.some(w => lc.includes(w))) throw new Error('step1_no_gap_reference');\n  rows.push({ step: m.step, body: stored, char_count: stored.length });\n}\nreturn [{ json: { lead_id: job.lead_id, channel: job.channel, model: job.model, messages: rows } }];"
+      },
+      "id": "validate",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: $('Loop jobs').item.json.model_id, max_tokens: $('Loop jobs').item.json.max_tokens, temperature: 0.7, system: $('Loop jobs').item.json.system + '\\n\\nYour previous draft FAILED validation. Rewrite strictly obeying: message 1 <=160 chars, reference the audit gap AND a recent post, no forbidden phrases, no em-dashes, no !!!. Return only the JSON.', messages: [ { role: 'user', content: JSON.stringify($('Loop jobs').item.json.payload) } ] } }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "draft-retry",
+      "name": "Draft Retry (corrective)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        140,
+        360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic API (x-api-key)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 4000
+    },
+    {
+      "parameters": {
+        "jsCode": "const FORBIDDEN = [\"Love your recent post\", \"Love your content\", \"Your content is amazing\", \"Great post about\", \"Hope this finds you well\", \"I hope you're doing well\", \"Just wanted to reach out\", \"I wanted to reach out\", \"I came across your profile\", \"I noticed you're\", \"I saw that you\", \"Reaching out because\", \"Big fan of\", \"I found something crazy\", \"You won't believe what\", \"I have a secret\", \"Something interesting about your business\", \"Something surprising\", \"I noticed a weird thing\", \"Curious about something I found\", \"Hop on a quick call\", \"Jump on a call\", \"Get on a call\", \"Book a call\", \"Free strategy session\", \"Complimentary audit\", \"No obligation\", \"Discounted rate\", \"Limited time\", \"Special offer\", \"Just checking in\", \"Following up\", \"Circling back\", \"Bumping this\", \"Wanted to touch base\", \"Touch base\", \"Quick question\", \"Delve into\", \"In the realm of\", \"Tapestry\", \"Symphony\", \"Testament to\", \"Meticulously\", \"It's worth noting\"];\nconst respBody = $json;\nlet text = '';\ntry { text = (respBody.content || []).filter(b => b.type === 'text').map(b => b.text).join(''); } catch (e) {}\nlet parsed;\ntry { parsed = JSON.parse((text || '').replace(/```json|```/g, '').trim()); }\ncatch (e) { throw new Error('malformed_json_from_model'); }\nconst job = $('Loop jobs').item.json;\nconst isDm = job.is_dm;\nconst msgs = parsed.messages || [];\nif (!Array.isArray(msgs) || msgs.length === 0) throw new Error('no_messages');\nconst expected = isDm ? 3 : 4;\nif (msgs.length !== expected) throw new Error('expected_' + expected + '_messages_got_' + msgs.length);\nconst gap = (job.payload.gap_summary || '').toLowerCase();\nconst gapWords = gap.split(/[^a-z0-9]+/).filter(w => w.length > 4);\nconst rows = [];\nfor (const m of msgs) {\n  if (!m.body) throw new Error('empty_body_step_' + m.step);\n  let stored = m.body;\n  if (!isDm) {\n    if (!m.subject) throw new Error('email_missing_subject_step_' + m.step);\n    stored = 'Subject: ' + m.subject + '\\n\\n' + m.body;\n  }\n  const lc = (m.body + ' ' + (m.subject || '')).toLowerCase();\n  for (const p of FORBIDDEN) { if (lc.includes(p.toLowerCase())) throw new Error('forbidden_phrase:' + p + '@' + m.step); }\n  if (m.body.includes(' \\u2014 ')) throw new Error('em_dash@' + m.step);\n  if (m.body.includes('!!!')) throw new Error('triple_bang@' + m.step);\n  if (isDm && m.step === 1 && m.body.length > 160) throw new Error('msg1_over_160:' + m.body.length);\n  if (m.step === 1 && gapWords.length && !gapWords.some(w => lc.includes(w))) throw new Error('step1_no_gap_reference');\n  rows.push({ step: m.step, body: stored, char_count: stored.length });\n}\nreturn [{ json: { lead_id: job.lead_id, channel: job.channel, model: job.model, messages: rows } }];"
+      },
+      "id": "validate-retry",
+      "name": "Validate Retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        360
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_outreach (lead_id, channel, sequence_step, status, draft_body, draft_char_count, draft_model)\nSELECT $1, $2::outreach_channel_enum, m.step, 'draft', m.body, m.char_count, $3\nFROM jsonb_to_recordset($4::jsonb) AS m(step int, body text, char_count int)\nWHERE NOT EXISTS (SELECT 1 FROM lead_outreach lo WHERE lo.lead_id = $1 AND lo.channel = $2::outreach_channel_enum);",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id, $json.channel, $json.model, JSON.stringify($json.messages)] }}"
+        }
+      },
+      "id": "save",
+      "name": "Save Drafts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        360,
+        140
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'draft', $2::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ [ $('Loop jobs').item.json.lead_id, JSON.stringify({ channel: $('Loop jobs').item.json.channel, model: $('Loop jobs').item.json.model, messages: ($('Loop jobs').item.json.is_dm ? 3 : 4) }) ] }}"
+        }
+      },
+      "id": "event",
+      "name": "Log Draft Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        580,
+        140
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'draft_failed', $2::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ [$('Loop jobs').item.json.lead_id, JSON.stringify({ channel: $('Loop jobs').item.json.channel, error: ($json.error && $json.error.message) ? $json.error.message : 'validation_failed_twice' }) ] }}"
+        }
+      },
+      "id": "event-fail",
+      "name": "Log Draft Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        580,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "jitter",
+      "name": "Jitter",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Draft Outreach\nEvery 5 min: pulls score>=15 leads with no drafts yet, expands to one job per supported channel (IG/LinkedIn/FB DM if a handle exists, cold email if an address exists), drafts with Sonnet (15-19) or Opus (20+).\n\n**Prompts + forbidden-phrase list are embedded VERBATIM** from prompts/ by scripts/build_drafting_workflow.py \u2014 do not hand-edit; re-run the builder after prompt changes.\n\n**Validator (hard gates):** msg1 <=160 chars, references the gap, no forbidden phrases, no em-dashes, no !!!. Fail -> ONE corrective retry -> if still bad, 'draft_failed' event, no bad draft written.\n\n**Idempotent:** per-channel NOT EXISTS guard; lead-level poll guard avoids re-calling Claude.\n\n**Email note:** schema has no subject column, so email subject is folded into draft_body as 'Subject: ...'.\n\n**Set:** `Postgres \u00b7 warm_outreach` + `Anthropic API (x-api-key)`.",
+        "height": 380,
+        "width": 480
+      },
+      "id": "note",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -960,
+        -160
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 min": {
+      "main": [
+        [
+          {
+            "node": "Scored Leads To Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scored Leads To Draft": {
+      "main": [
+        [
+          {
+            "node": "Expand To Channel Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand To Channel Jobs": {
+      "main": [
+        [
+          {
+            "node": "Loop jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop jobs": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Draft (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          {
+            "node": "Save Drafts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Draft Retry (corrective)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft Retry (corrective)": {
+      "main": [
+        [
+          {
+            "node": "Validate Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Retry": {
+      "main": [
+        [
+          {
+            "node": "Save Drafts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Draft Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Drafts": {
+      "main": [
+        [
+          {
+            "node": "Log Draft Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Draft Event": {
+      "main": [
+        [
+          {
+            "node": "Jitter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Draft Failed": {
+      "main": [
+        [
+          {
+            "node": "Jitter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jitter": {
+      "main": [
+        [
+          {
+            "node": "Loop jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templatecredsSetupCompleted": false
+  }
+}

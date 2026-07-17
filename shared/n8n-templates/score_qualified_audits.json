@@ -1,0 +1,360 @@
+{
+  "name": "OPS-WO \u00b7 Score Qualified Audits",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "sched",
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id AS lead_id, l.company_name, l.domain, l.icp_tier, l.founder_name,\n       e.traffic_estimate, e.tech_stack, e.recent_social_posts,\n       a.welcome_email_received, a.welcome_has_cta, a.abandoned_cart_count,\n       a.abandoned_application_followup_count, a.first_recovery_delay_hours,\n       a.discount_offered, a.total_emails_received_72h, a.deliverability_signal, a.gap_summary\nFROM lead_audits a\nJOIN leads l ON l.id = a.lead_id\nLEFT JOIN lead_enrichment e ON e.lead_id = l.id\nWHERE a.audit_status = 'complete'\n  AND l.qualification_score IS NULL\n  AND l.is_archived = FALSE\nORDER BY a.completed_at ASC NULLS LAST\nLIMIT 20;",
+        "options": {}
+      },
+      "id": "pg-select",
+      "name": "Audits To Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -740,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop",
+      "name": "Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $('Loop').item.json;\nconst payload = {\n  company_name: r.company_name, domain: r.domain, icp_tier: r.icp_tier,\n  traffic_monthly: (r.traffic_estimate ?? null),\n  tech_stack: r.tech_stack || {},\n  recent_social_posts: r.recent_social_posts || [],\n  audit: {\n    welcome_email_received: r.welcome_email_received,\n    welcome_has_cta: r.welcome_has_cta,\n    abandoned_cart_count: r.abandoned_cart_count,\n    abandoned_application_followup_count: r.abandoned_application_followup_count,\n    first_recovery_delay_hours: r.first_recovery_delay_hours,\n    discount_offered: r.discount_offered,\n    total_emails_received_72h: r.total_emails_received_72h,\n    deliverability_signal: r.deliverability_signal,\n    gap_summary: r.gap_summary\n  }\n};\n// SYSTEM prompt embedded verbatim from prompts/scoring_haiku.md (built by scripts/build_scoring_workflow.py \u2014 do not hand-edit)\nconst SYSTEM = `## System\n\nYou are a B2B lead qualification analyst for FascinateCopy, a copywriting and email marketing agency that sells $5,000\u2013$7,000/month Full Stack Email Marketing retainers. Your only job is to score a single prospect on a strict 25-point rubric and return JSON.\n\nYou never chat. You never explain your role. You never ask clarifying questions. If input is missing a field, score conservatively based on what's present.\n\n## Rubric \u2014 5 factors, 1\u20135 each\n\n**1. Revenue Level (1\u20135)**\n- 5: $500K+/mo confirmed\n- 4: $250K\u2013$500K/mo\n- 3: $100K\u2013$250K/mo\n- 2: $50K\u2013$100K/mo (below target for primary tier)\n- 1: <$50K/mo or unknown\n\n**2. Profit Margin (1\u20135)**\n- 5: Info business / coaching / courses (60\u201380%+ margins)\n- 4: SaaS / digital services\n- 3: Ecom with $70+ AOV\n- 2: Ecom with $27\u2013$70 AOV\n- 1: Ecom with <$27 AOV or dropshipping model\n\n**3. Email List Size (1\u20135)**\n- 5: 100K+ engaged subscribers\n- 4: 50K\u2013100K\n- 3: 20K\u201350K\n- 2: 10K\u201320K\n- 1: <10K or unknown\n\n**4. Growth Rate (1\u20135)**\n- 5: Actively spending on ads + growing traffic month-over-month\n- 4: Actively spending on ads\n- 3: Stable traffic, no visible ad spend\n- 2: Declining traffic\n- 1: Dead/inactive brand\n\n**5. Decision-Making Authority (1\u20135)**\n- 5: Founder/CEO with clear operational involvement (posts on social, in ads)\n- 4: Founder/CEO less visible but confirmed decision-maker\n- 3: Head of Marketing at small-mid company\n- 2: Marketing manager (likely needs approval)\n- 1: Unknown role or clearly gatekept\n\n## Output\n\nReturn ONLY this JSON. No preamble, no explanation outside the fields:\n\n\\`\\`\\`json\n{\n  \"subscores\": {\n    \"revenue\": <int 1-5>,\n    \"margin\": <int 1-5>,\n    \"list\": <int 1-5>,\n    \"growth\": <int 1-5>,\n    \"authority\": <int 1-5>\n  },\n  \"total\": <int 5-25>,\n  \"reasoning\": \"<2-4 sentences justifying the score, referencing specific input fields>\"\n}\n\\`\\`\\`\n\n## Input format\n\nYou will receive a JSON payload with these keys:\n- \\`company_name\\`\n- \\`domain\\`\n- \\`icp_tier\\` \u2014 \"primary_info\" | \"secondary_ecom\"\n- \\`traffic_monthly\\` \u2014 integer or null\n- \\`tech_stack\\` \u2014 object with \\`esp\\`, \\`cart\\`, \\`page_builder\\`\n- \\`recent_social_posts\\` \u2014 array (may be used to gauge founder activity)\n- \\`audit\\` \u2014 object with \\`welcome_email_received\\`, \\`abandoned_cart_count\\`, \\`total_emails_received_72h\\`, \\`deliverability_signal\\`, \\`gap_summary\\`, etc.\n\nUse the audit signals for the growth rate score \u2014 an active email program signals a healthy business.\n\n## Examples\n\n**Input:**\n\\`\\`\\`json\n{\n  \"company_name\": \"Sarah Coaching Co\",\n  \"domain\": \"sarahcoaching.com\",\n  \"icp_tier\": \"primary_info\",\n  \"traffic_monthly\": 45000,\n  \"tech_stack\": {\"esp\": \"kajabi\", \"page_builder\": \"kajabi\"},\n  \"audit\": {\"welcome_email_received\": true, \"abandoned_application_followup_count\": 0, \"total_emails_received_72h\": 4, \"deliverability_signal\": \"primary\", \"gap_summary\": \"Application abandon is uncovered\"}\n}\n\\`\\`\\`\n\n**Output:**\n\\`\\`\\`json\n{\n  \"subscores\": {\"revenue\": 3, \"margin\": 5, \"list\": 3, \"growth\": 4, \"authority\": 4},\n  \"total\": 19,\n  \"reasoning\": \"Info coaching business with strong margin profile and confirmed email program (welcome + 4 broadcasts in 72hr). Traffic of 45K suggests $100\u2013250K/mo range. Application-abandon gap is a clear revenue leak \u2014 high-fit prospect for warm queue.\"\n}\n\\`\\`\\``;\nreturn [{ json: { lead_id: r.lead_id, payload, system: SYSTEM } }];"
+      },
+      "id": "compose",
+      "name": "Compose Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -300,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-haiku-4-5-20251001', max_tokens: 400, temperature: 0, system: $json.system, messages: [ { role: 'user', content: JSON.stringify($json.payload) } ] } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "haiku",
+      "name": "Haiku Score",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Anthropic API (x-api-key)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Haiku's JSON, validate the rubric schema. Throw on invalid so the error\n// output routes to the score_failed logger (never force a default score).\nconst body = $json;\nlet text = '';\ntry { text = (body.content || []).filter(b => b.type === 'text').map(b => b.text).join(''); } catch (e) {}\nlet parsed;\ntry { parsed = JSON.parse((text || '').replace(/```json|```/g, '').trim()); }\ncatch (e) { throw new Error('malformed_json_from_haiku'); }\nconst ss = parsed.subscores || {};\nfor (const k of ['revenue','margin','list','growth','authority']) {\n  const v = ss[k];\n  if (!Number.isInteger(v) || v < 1 || v > 5) throw new Error('bad_subscore_' + k);\n}\nconst total = parsed.total;\nif (!Number.isInteger(total) || total < 5 || total > 25) throw new Error('bad_total');\nconst sum = ['revenue','margin','list','growth','authority'].reduce((a,k)=>a+ss[k],0);\nif (sum !== total) throw new Error('total_mismatch_' + sum + '_vs_' + total);\nconst queue = total >= 20 ? 'hot' : total >= 15 ? 'warm' : total >= 10 ? 'cold' : 'archive';\nreturn [{ json: { lead_id: $('Loop').item.json.lead_id, subscores: ss, total, reasoning: (parsed.reasoning || ''), queue } }];"
+      },
+      "id": "parse",
+      "name": "Parse & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        200
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET\n  qualification_score = $2,\n  qualification_subscores = $3::jsonb,\n  qualification_reasoning = $4,\n  is_archived = CASE WHEN $2 < 10 THEN TRUE ELSE is_archived END,\n  archive_reason = CASE WHEN $2 < 10 THEN 'score below threshold: ' || $2 || '/25' ELSE archive_reason END,\n  source_metadata = source_metadata || jsonb_build_object('queue', $5::text),\n  updated_at = NOW()\nWHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id, $json.total, JSON.stringify($json.subscores), $json.reasoning, $json.queue] }}"
+        }
+      },
+      "id": "save",
+      "name": "Save Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        360,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'score', $2::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id, JSON.stringify({ score: $json.total, queue: $json.queue, subscores: $json.subscores }) ] }}"
+        }
+      },
+      "id": "event",
+      "name": "Log Score Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        580,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'score_failed', $2::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ [$('Loop').item.json.lead_id, JSON.stringify({ error: ($json.error && $json.error.message) ? $json.error.message : 'score_parse_failed' }) ] }}"
+        }
+      },
+      "id": "event-fail",
+      "name": "Log Score Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        360,
+        320
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "seconds"
+      },
+      "id": "jitter",
+      "name": "Jitter",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Score Qualified Audits\nEvery minute: pulls completed audits whose lead has no score yet, sends enrichment+audit to Haiku with the rubric (embedded verbatim from prompts/scoring_haiku.md), writes score + 5 subscores + reasoning, routes by band.\n\n**Routing** is implicit in the score (Phase 5 selects by band). Only <10 writes is_archived. The queue label (hot/warm/cold) is stored in source_metadata for visibility.\n\n**Malformed Haiku JSON** routes to the error output -> 'score_failed' event; the lead stays unscored and is retried next run (never forced to a default score).\n\n**Set:** `Postgres \u00b7 warm_outreach` + `Anthropic API (x-api-key)` credentials.\n**Idempotent:** re-runs skip already-scored leads (qualification_score IS NULL guard).",
+        "height": 340,
+        "width": 470
+      },
+      "id": "note",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -120
+      ]
+    }
+  ],
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Audits To Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audits To Score": {
+      "main": [
+        [
+          {
+            "node": "Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Compose Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Payload": {
+      "main": [
+        [
+          {
+            "node": "Haiku Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Haiku Score": {
+      "main": [
+        [
+          {
+            "node": "Parse & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Validate": {
+      "main": [
+        [
+          {
+            "node": "Save Score",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Score Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Score": {
+      "main": [
+        [
+          {
+            "node": "Log Score Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Score Event": {
+      "main": [
+        [
+          {
+            "node": "Jitter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Score Failed": {
+      "main": [
+        [
+          {
+            "node": "Jitter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jitter": {
+      "main": [
+        [
+          {
+            "node": "Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templatecredsSetupCompleted": false
+  }
+}

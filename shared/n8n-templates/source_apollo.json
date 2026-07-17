@@ -1,0 +1,390 @@
+{
+  "name": "OPS-WO \u00b7 Source \u00b7 Apollo",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "sched-apollo",
+      "name": "Daily 6am UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -720,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/api/v1/mixed_people/api_search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"person_titles\": [\"founder\", \"ceo\", \"owner\", \"head of marketing\"],\n  \"q_organization_keyword_tags\": [\"coach\", \"course\", \"consultant\", \"agency\", \"info product\", \"online business\"],\n  \"organization_num_employees_ranges\": [\"1,10\", \"11,20\", \"21,50\", \"51,100\", \"101,200\"],\n  \"page\": 1,\n  \"per_page\": 25\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": false
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "http-apollo",
+      "name": "Apollo People Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -500,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Apollo API (X-Api-Key)"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "people",
+        "options": {}
+      },
+      "id": "split-people",
+      "name": "Split People",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize an Apollo person + org into our lead shape, then classify.\n// classifyLead() below is the canonical copy from scripts/icp_filter.js \u2014 KEEP IN SYNC.\n\nconst DROPSHIP = [/\\bdropship(ping)?\\b/i, /\\baliexpress\\b/i, /\\bprint on demand\\b/i, /\\bpod\\b/i];\nconst BRICK = [/\\blocal\\b/i, /\\brestaurant\\b/i, /\\bsalon\\b/i, /\\bdentist\\b/i, /\\bchiropractor\\b/i, /\\bretail store\\b/i];\nconst ECOM = [\"shopify\",\"woocommerce\",\"bigcommerce\",\"magento\",\"ecommerce\",\"e-commerce\",\"dtc\"];\nconst INFO = [\"coach\",\"course\",\"consultant\",\"mastermind\",\"program\",\"mentor\",\"info product\",\"online business\",\"agency\"];\nconst MIN_MONTHLY_REVENUE = 100000;\nconst MAX_EMPLOYEES = 500;\nconst anyMatch = (ps, t) => ps.some(re => re.test(t || \"\"));\nconst anyIncludes = (ns, arr) => { const hay = (arr||[]).join(\" \").toLowerCase(); return ns.some(n => hay.includes(n)); };\nfunction classifyLead(raw){\n  const name = raw.company_name||\"\"; const desc = raw.description||\"\"; const nameDesc = `${name} ${desc}`;\n  const domain = (raw.domain||\"\").toLowerCase(); const keywords = raw.keywords||[];\n  // Apollo returns 0 for undisclosed revenue \u2014 treat 0 as UNKNOWN, not a real zero.\n  const _rev = raw.annual_revenue_usd;\n  const monthlyRevenue = (_rev != null && _rev > 0) ? _rev/12 : null;\n  if (anyMatch(DROPSHIP,nameDesc)) return arch(\"dropshipper\");\n  if (anyMatch(BRICK,desc)) return arch(\"brick_and_mortar\");\n  if (raw.employee_count!=null && raw.employee_count>MAX_EMPLOYEES) return arch(\"too_enterprise\");\n  if (/\\.(local|city)$/.test(domain)) return arch(\"geo_local_domain\");\n  const looksEcom = anyIncludes(ECOM,keywords)||anyIncludes(ECOM,[nameDesc]);\n  const looksInfo = anyIncludes(INFO,keywords)||anyIncludes(INFO,[nameDesc]);\n  if (monthlyRevenue!=null && monthlyRevenue<MIN_MONTHLY_REVENUE) return arch(\"below_revenue_threshold\");\n  // Apollo rarely has real revenue for small info businesses; unknown revenue is NOT a\n  // disqualifier. Let the live audit be the real qualifier downstream.\n  if (looksEcom) return rt(\"secondary_ecom\",\"high\");\n  if (looksInfo) return rt(\"primary_info\",\"high\");\n  return rt(\"primary_info\",\"low\");\n}\nconst arch = r => ({icp_tier:\"disqualified\",is_archived:true,archive_reason:r,routing_confidence:\"n/a\"});\nconst rt = (t,c) => ({icp_tier:t,is_archived:false,archive_reason:null,routing_confidence:c});\n\nfunction hostname(url){ try { return new URL(url.startsWith(\"http\")?url:`https://${url}`).hostname.replace(/^www\\./,\"\"); } catch { return null; } }\n\nconst out = [];\nfor (const item of $input.all()) {\n  const p = item.json;\n  const org = p.organization || {};\n  // domain: prefer org website, else derive from the founder email (reveal responses\n  // often have thin org data), else skip.\n  const emailDomain = (p.email && p.email.includes(\"@\") && !/email_not_unlocked/i.test(p.email))\n    ? p.email.split(\"@\")[1].toLowerCase() : null;\n  const domain = hostname(org.website_url || org.primary_domain || \"\") || emailDomain;\n  if (!domain) continue;\n  const raw = {\n    domain,\n    company_name: org.name || (p.employment_history && p.employment_history[0] && p.employment_history[0].organization_name) || null,\n    description: org.short_description || org.seo_description || \"\",\n    keywords: [].concat(org.keywords || [], org.industry ? [org.industry] : []).map(s => String(s).toLowerCase()),\n    employee_count: org.estimated_num_employees ?? null,\n    annual_revenue_usd: org.annual_revenue ?? org.organization_revenue ?? null\n  };\n  const c = classifyLead(raw);\n  out.push({ json: {\n    domain: raw.domain,\n    company_name: raw.company_name,\n    founder_name: p.name || null,\n    founder_email: p.email && !/email_not_unlocked/i.test(p.email) ? p.email : null,\n    founder_linkedin_url: p.linkedin_url || null,\n    founder_ig_handle: null,\n    source: \"apollo\",\n    source_metadata: {\n      apollo_person_id: p.id || null,\n      title: p.title || null,\n      employee_count: raw.employee_count,\n      annual_revenue_usd: raw.annual_revenue_usd,\n      keywords: raw.keywords,\n      routing_confidence: c.routing_confidence\n    },\n    icp_tier: c.icp_tier,\n    is_archived: c.is_archived,\n    archive_reason: c.archive_reason\n  }});\n}\nreturn out;"
+      },
+      "id": "code-classify",
+      "name": "Normalize & Classify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (domain, company_name, founder_name, founder_email, founder_linkedin_url, founder_ig_handle, source, source_metadata, icp_tier, is_archived, archive_reason)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::icp_tier_enum, $10, $11)\nON CONFLICT (LOWER(domain)) DO NOTHING\nRETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [$json.domain, $json.company_name, $json.founder_name, $json.founder_email, $json.founder_linkedin_url, $json.founder_ig_handle, $json.source, JSON.stringify($json.source_metadata), $json.icp_tier, $json.is_archived, $json.archive_reason] }}"
+        }
+      },
+      "id": "pg-upsert",
+      "name": "Upsert Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        160,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nSELECT id, 'source', $2::jsonb, 'system' FROM leads WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.id, JSON.stringify({ source: 'apollo', archived: $('Normalize & Classify').item.json.is_archived, archive_reason: $('Normalize & Classify').item.json.archive_reason, tier: $('Normalize & Classify').item.json.icp_tier }) ] }}"
+        }
+      },
+      "id": "pg-event",
+      "name": "Log Source Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        380,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Postgres \u00b7 warm_outreach"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "agg-run",
+      "name": "Collect Run",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Summarize the run for the Discord digest.\nconst rows = $input.first().json.data || [];\nconst inserted = rows.filter(r => r && r.id).length;\nconst byTier = {};\nfor (const r of $('Normalize & Classify').all()) {\n  const t = r.json.is_archived ? `archived:${r.json.archive_reason}` : r.json.icp_tier;\n  byTier[t] = (byTier[t]||0)+1;\n}\nconst lines = Object.entries(byTier).map(([k,v]) => `\u2022 ${k}: ${v}`).join('\\n');\nreturn [{ json: { content: `**Apollo sourcing run** \u2014 ${new Date().toISOString().slice(0,10)}\\nNew rows inserted: ${inserted}\\n${lines || '(no leads returned)'}` } }];"
+      },
+      "id": "code-summary",
+      "name": "Build Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_DIGEST_WEBHOOK }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { content: $json.content } }}",
+        "options": {}
+      },
+      "id": "http-discord",
+      "name": "Discord Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "content": "## Source \u00b7 Apollo\nDaily 6am. Pulls info-business prospects, classifies with the canonical ICP filter (mirror of scripts/icp_filter.js), upserts case-insensitively on domain, logs a 'source' event per lead, posts a digest.\n\n**Set before running:**\n1. Credential `Apollo API (X-Api-Key)` \u2014 Header Auth, header name `X-Api-Key`.\n2. Credential `Postgres \u00b7 warm_outreach`.\n3. Env `DISCORD_DIGEST_WEBHOOK` (or swap the last node for the Discord node).\n\n**Dedup:** `ON CONFLICT (LOWER(domain)) DO NOTHING` \u2014 re-runs never double-insert.\n**Nothing is dropped:** disqualified leads are written with is_archived=TRUE + reason.\n**Free-tier note:** per_page=25, page=1. Paginate by looping page numbers once on paid tier.",
+        "height": 320,
+        "width": 420
+      },
+      "id": "note-apollo",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/api/v1/people/match",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { id: $json.id, reveal_personal_emails: true } }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "http-reveal",
+      "name": "Reveal (match)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -120,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Apollo API (X-Api-Key)"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// people/match returns { person: {...} }. Emit that person (with revealed email)\nconst p = $json.person || $json;\nif (!p || (!p.email && !p.id)) { return []; }  // skip if reveal failed\nreturn [{ json: p }];"
+      },
+      "id": "code-flatten",
+      "name": "Flatten Person",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 6am UTC": {
+      "main": [
+        [
+          {
+            "node": "Apollo People Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo People Search": {
+      "main": [
+        [
+          {
+            "node": "Split People",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split People": {
+      "main": [
+        [
+          {
+            "node": "Reveal (match)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Classify": {
+      "main": [
+        [
+          {
+            "node": "Upsert Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Lead": {
+      "main": [
+        [
+          {
+            "node": "Log Source Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Source Event": {
+      "main": [
+        [
+          {
+            "node": "Collect Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Run": {
+      "main": [
+        [
+          {
+            "node": "Build Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Digest": {
+      "main": [
+        [
+          {
+            "node": "Discord Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reveal (match)": {
+      "main": [
+        [
+          {
+            "node": "Flatten Person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Person": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "meta": {
+    "templatecredsSetupCompleted": false
+  }
+}

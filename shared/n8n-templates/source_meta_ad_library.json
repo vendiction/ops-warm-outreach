@@ -1,0 +1,108 @@
+{
+  "name": "OPS-WO · Source · Meta Ad Library",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 1 }] }
+      },
+      "id": "sched-meta",
+      "name": "Hourly",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-720, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, domain\nFROM leads\nWHERE is_archived = FALSE\n  AND NOT (source_metadata ? 'is_advertising')\nORDER BY created_at DESC\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "pg-need-check",
+      "name": "Leads Needing Ad Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-500, 300],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } }
+    },
+    {
+      "parameters": { "options": { "reset": false } },
+      "id": "loop",
+      "name": "Loop (throttle)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-280, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://meta_scraper:8091/scrape",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { domain: $json.domain, country: 'US' } }}",
+        "options": { "timeout": 40000 }
+      },
+      "id": "http-scrape",
+      "name": "Check Meta Ads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-60, 200],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads\nSET source_metadata = source_metadata || jsonb_build_object(\n      'is_advertising', $2::boolean,\n      'active_ads_count', $3::int,\n      'ad_check_reason', $4::text\n    )\nWHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Loop (throttle)').item.json.id, ($json.is_advertising ?? null), ($json.active_ads_count ?? null), ($json.reason ?? null)] }}"
+        }
+      },
+      "id": "pg-update",
+      "name": "Save Ad Signal",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [160, 200],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "amount": 2, "unit": "seconds" },
+      "id": "wait",
+      "name": "Jitter",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [380, 200]
+    },
+    {
+      "parameters": {
+        "content": "## Source · Meta Ad Library\nHourly. Finds sourced leads without an ad check, asks the `meta_scraper` service whether each is running Meta ads, writes the signal into `source_metadata` (merged, not overwritten). This is a **confidence signal**, not a gate — `is_advertising=null` on failure never archives a lead.\n\n**Set:** `Postgres · warm_outreach` credential. Deploy the `scrapers/meta_ad_library` container on `n8n_default` as `meta_scraper`.\n\n**Throttle:** batched loop + 2s jitter keeps volume under Meta's IP rate limit; the service also rotates proxy sessions.",
+        "height": 260,
+        "width": 420
+      },
+      "id": "note-meta",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-500, -40]
+    }
+  ],
+  "connections": {
+    "Hourly": { "main": [[{ "node": "Leads Needing Ad Check", "type": "main", "index": 0 }]] },
+    "Leads Needing Ad Check": { "main": [[{ "node": "Loop (throttle)", "type": "main", "index": 0 }]] },
+    "Loop (throttle)": {
+      "main": [
+        [],
+        [{ "node": "Check Meta Ads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Meta Ads": { "main": [[{ "node": "Save Ad Signal", "type": "main", "index": 0 }]] },
+    "Save Ad Signal": { "main": [[{ "node": "Jitter", "type": "main", "index": 0 }]] },
+    "Jitter": { "main": [[{ "node": "Loop (throttle)", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {},
+  "meta": { "templatecredsSetupCompleted": false }
+}

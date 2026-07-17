@@ -1,0 +1,171 @@
+{
+  "name": "OPS-WO · Enrich New Leads",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] } },
+      "id": "sched",
+      "name": "Every 10 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT l.id, l.domain, l.founder_ig_handle, l.founder_linkedin_url, l.icp_tier\nFROM leads l\nWHERE l.is_archived = FALSE\n  AND NOT EXISTS (SELECT 1 FROM lead_enrichment e WHERE e.lead_id = l.id)\nORDER BY l.created_at DESC\nLIMIT 25;",
+        "options": {}
+      },
+      "id": "pg-need",
+      "name": "Leads Needing Enrichment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-680, 300],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } }
+    },
+    {
+      "parameters": { "batchSize": 1, "options": {} },
+      "id": "loop",
+      "name": "Loop leads",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://funnel_detector:8094/detect",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { domain: $('Loop leads').item.json.domain } }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-funnel",
+      "name": "Detect Funnel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 200],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://similarweb:8092/traffic",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { domain: $('Loop leads').item.json.domain } }}",
+        "options": { "timeout": 40000 }
+      },
+      "id": "http-traffic",
+      "name": "Get Traffic",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-40, 200],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://social_posts:8093/posts",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { domain: $('Loop leads').item.json.domain, ig_handle: $('Loop leads').item.json.founder_ig_handle, linkedin_url: $('Loop leads').item.json.founder_linkedin_url, platform: ($('Loop leads').item.json.icp_tier === 'secondary_ecom' ? 'ig' : 'linkedin') } }}",
+        "options": { "timeout": 40000 }
+      },
+      "id": "http-social",
+      "name": "Get Social Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [160, 200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compose one lead_enrichment row from the three service responses.\n// Fail-soft: a failed traffic or social call does NOT fail enrichment. Only a\n// missing funnel_type makes enrichment 'failed' (audit worker can't run without it).\nconst lead = $('Loop leads').item.json;\nconst funnel = $('Detect Funnel').item.json || {};\nconst traffic = $('Get Traffic').item.json || {};\nconst social = $('Get Social Posts').item.json || {};\n\nconst funnelType = funnel.funnel_type || null;\nconst hasFunnel = !!funnelType;\n\nreturn [{ json: {\n  lead_id: lead.id,\n  traffic_estimate: (traffic.traffic_estimate ?? null),\n  tech_stack: funnel.tech_stack || {},\n  funnel_entry_url: funnel.funnel_entry_url || null,\n  funnel_type: funnelType,\n  form_selector: funnel.form_selector || null,\n  recent_social_posts: Array.isArray(social.posts) ? social.posts : [],\n  enrichment_status: hasFunnel ? 'complete' : 'failed',\n  enrichment_failure_reason: hasFunnel ? null : (funnel.reason || 'no discoverable funnel'),\n  // carried for the event log\n  _social_reason: social.reason || null,\n  _traffic_reason: traffic.reason || null\n}}];"
+      },
+      "id": "code-compose",
+      "name": "Compose Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_enrichment (lead_id, traffic_estimate, tech_stack, funnel_entry_url, funnel_type, recent_social_posts, enrichment_status, enrichment_failure_reason)\nVALUES ($1, $2, $3::jsonb, $4, $5::audit_mode_enum, $6::jsonb, $7, $8)\nON CONFLICT (lead_id) DO UPDATE SET\n  traffic_estimate = EXCLUDED.traffic_estimate,\n  tech_stack = EXCLUDED.tech_stack,\n  funnel_entry_url = EXCLUDED.funnel_entry_url,\n  funnel_type = EXCLUDED.funnel_type,\n  recent_social_posts = EXCLUDED.recent_social_posts,\n  enrichment_status = EXCLUDED.enrichment_status,\n  enrichment_failure_reason = EXCLUDED.enrichment_failure_reason,\n  updated_at = NOW()\nRETURNING lead_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.lead_id, $json.traffic_estimate, JSON.stringify($json.tech_stack), $json.funnel_entry_url, $json.funnel_type, JSON.stringify($json.recent_social_posts), $json.enrichment_status, $json.enrichment_failure_reason] }}"
+        }
+      },
+      "id": "pg-insert",
+      "name": "Save Enrichment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [560, 200],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO outreach_events (lead_id, event_type, event_data, actor)\nVALUES ($1, 'enrich', $2::jsonb, 'system');",
+        "options": {
+          "queryReplacement": "={{ [$('Compose Enrichment').item.json.lead_id, JSON.stringify({ status: $('Compose Enrichment').item.json.enrichment_status, funnel_type: $('Compose Enrichment').item.json.funnel_type, failure_reason: $('Compose Enrichment').item.json.enrichment_failure_reason, social_reason: $('Compose Enrichment').item.json._social_reason, traffic_reason: $('Compose Enrichment').item.json._traffic_reason }) ] }}"
+        }
+      },
+      "id": "pg-event",
+      "name": "Log Enrich Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [760, 200],
+      "credentials": { "postgres": { "id": "REPLACE_ME", "name": "Postgres · warm_outreach" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "amount": 1, "unit": "seconds" },
+      "id": "wait",
+      "name": "Jitter",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "content": "## Enrich New Leads\nEvery 10 min: finds non-archived leads with no enrichment row, and for each calls three services, composes a `lead_enrichment` row, logs an `enrich` event.\n\n**Fail-soft:** traffic or social failing does NOT fail enrichment — only a missing `funnel_type` sets status='failed' with a reason (the audit worker needs the funnel URL).\n\n**Services (deploy on `n8n_default`):**\n- `funnel_detector:8094` — public, no account. Produces funnel_type + tech_stack.\n- `similarweb:8092` — public, no account.\n- `social_posts:8093` — ⚠️ needs a warmed SCRAPING persona; returns [] until then (non-fatal).\n\n**Set:** `Postgres · warm_outreach` credential. Re-runs upsert on lead_id (safe).",
+        "height": 340,
+        "width": 460
+      },
+      "id": "note",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-680, -120]
+    }
+  ],
+  "connections": {
+    "Every 10 min": { "main": [[{ "node": "Leads Needing Enrichment", "type": "main", "index": 0 }]] },
+    "Leads Needing Enrichment": { "main": [[{ "node": "Loop leads", "type": "main", "index": 0 }]] },
+    "Loop leads": {
+      "main": [
+        [],
+        [{ "node": "Detect Funnel", "type": "main", "index": 0 }]
+      ]
+    },
+    "Detect Funnel": { "main": [[{ "node": "Get Traffic", "type": "main", "index": 0 }]] },
+    "Get Traffic": { "main": [[{ "node": "Get Social Posts", "type": "main", "index": 0 }]] },
+    "Get Social Posts": { "main": [[{ "node": "Compose Enrichment", "type": "main", "index": 0 }]] },
+    "Compose Enrichment": { "main": [[{ "node": "Save Enrichment", "type": "main", "index": 0 }]] },
+    "Save Enrichment": { "main": [[{ "node": "Log Enrich Event", "type": "main", "index": 0 }]] },
+    "Log Enrich Event": { "main": [[{ "node": "Jitter", "type": "main", "index": 0 }]] },
+    "Jitter": { "main": [[{ "node": "Loop leads", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "pinData": {},
+  "meta": { "templatecredsSetupCompleted": false }
+}
